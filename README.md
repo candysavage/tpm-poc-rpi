@@ -38,6 +38,9 @@ secure-embedded-platform/
 ├── README.md                   ← this file
 ├── phase1/
 │   └── README.md               ← Raspberry Pi OS setup, wiring, provisioning, attestation
+├── certs/
+│   ├── ek_cert_rsa.der         ← Infineon-issued RSA EK certificate
+│   └── ek_cert_ecc.der         ← Infineon-issued ECC EK certificate
 └── scripts/
     └── attest.sh               ← full attestation flow (local + PCR)
 ```
@@ -111,6 +114,9 @@ sudo ./scripts/attest.sh clean    # remove temp files
 - [x] Key hierarchy: EK, SRK, AK provisioned and persisted
 - [x] Local attestation (nonce signing + OpenSSL verification)
 - [x] PCR attestation (PCR 23 extend + quote + checkquote)
+- [x] EK certificates extracted (RSA + ECC, Infineon CA chain)
+- [x] tpm2-abrmd verified running and enabled
+- [x] Key wrapping demo (child key created, stored on disk, loaded on demand)
 
 ### Phase 2 — Yocto 🔲
 - [ ] Custom Yocto image with `meta-raspberrypi` + `meta-security`

@@ -347,6 +347,9 @@ sig: <RSA signature bytes>
 | 7 | All keys survive reboot | ✅ |
 | 8 | Local attestation — nonce signed and verified | ✅ |
 | 9 | PCR attestation — quote generated and verified | ✅ |
+| 10 | EK certificates extracted and stored | ✅ |
+| 11 | tpm2-abrmd running and enabled | ✅ |
+| 12 | Key wrapping demo — child key created, loaded, and verified | ✅ |
 
 ---
 
@@ -366,3 +369,129 @@ sig: <RSA signature bytes>
 - [tpm2-tools documentation](https://tpm2-tools.readthedocs.io/)
 - [Infineon OPTIGA TPM SLB9673 Product Page](https://www.infineon.com)
 - [Raspberry Pi Device Tree Overlays README](https://github.com/raspberrypi/firmware/blob/master/boot/overlays/README)
+
+---
+
+## Step 9 — EK Certificate Extraction
+
+Infineon provisions two EK certificates on the SLB9673 at manufacture — one RSA, one ECC. These are stored in TPM NV memory and form the root of the manufacturer certificate chain.
+
+```bash
+sudo tpm2_getekcertificate \
+  -o /tmp/ek_cert_rsa.der \
+  -o /tmp/ek_cert_ecc.der
+
+sudo chmod 644 /tmp/ek_cert_rsa.der /tmp/ek_cert_ecc.der
+```
+
+Inspect the RSA certificate:
+
+```bash
+openssl x509 -inform der -in /tmp/ek_cert_rsa.der -text -noout
+```
+
+Inspect the ECC certificate:
+
+```bash
+openssl x509 -inform der -in /tmp/ek_cert_ecc.der -text -noout
+```
+
+**Confirmed fields:**
+
+| Field | RSA Cert | ECC Cert |
+|-------|----------|----------|
+| Algorithm | RSA 2048 | P-256 (ECC) |
+| Issued | Nov 18, 2023 | Nov 18, 2023 |
+| Expires | Nov 18, 2038 | Nov 18, 2038 |
+| Issuer | Infineon OPTIGA TPM 2.0 RSA CA 066 | Infineon OPTIGA TPM 2.0 ECC CA 066 |
+| Model | SLB 9673 TPM2.0 | SLB 9673 TPM2.0 |
+| Key Usage | Key Encipherment | Key Agreement |
+| Extended Key Usage | Endorsement Key Certificate | Endorsement Key Certificate |
+
+Store permanently:
+
+```bash
+sudo mkdir -p /opt/tpm-poc/certs
+sudo cp /tmp/ek_cert_rsa.der /opt/tpm-poc/certs/
+sudo cp /tmp/ek_cert_ecc.der /opt/tpm-poc/certs/
+sudo chmod 644 /opt/tpm-poc/certs/*
+```
+
+**Why this matters:** These certificates chain up to Infineon's CA. A remote verifier can confirm this is a genuine SLB9673, not a software TPM or clone, without physical access to the device.
+
+---
+
+## Step 10 — TPM Resource Manager (abrmd)
+
+The TPM Access Broker and Resource Management Daemon (`tpm2-abrmd`) handles concurrent TPM access from multiple processes. Verify it is running and enabled:
+
+```bash
+systemctl status tpm2-abrmd
+```
+
+**Expected output:**
+```
+● tpm2-abrmd.service - TPM2 Access Broker and Resource Management Daemon
+     Loaded: loaded (/usr/lib/systemd/system/tpm2-abrmd.service; enabled; preset: enabled)
+     Active: active (running)
+```
+
+It is installed with `apt install tpm2-abrmd` and enabled by default. No additional configuration needed for Phase 1.
+
+---
+
+## Step 11 — Key Wrapping Demo
+
+This demonstrates how to protect an unlimited number of keys using the TPM without consuming persistent handle slots. Child keys are created under the SRK, exported as encrypted blobs to the filesystem, and loaded on demand.
+
+### Create a wrapped key
+
+```bash
+sudo tpm2_create \
+  -C 0x81000001 \
+  -G rsa \
+  -g sha256 \
+  -u /opt/tpm-poc/wrapped_key.pub \
+  -r /opt/tpm-poc/wrapped_key.priv
+```
+
+This produces two files:
+- `wrapped_key.pub` — public portion
+- `wrapped_key.priv` — private portion, encrypted by the SRK (useless without this TPM)
+
+### Load and use the wrapped key
+
+```bash
+# Load from disk into TPM transient storage
+sudo tpm2_load \
+  -C 0x81000001 \
+  -u /opt/tpm-poc/wrapped_key.pub \
+  -r /opt/tpm-poc/wrapped_key.priv \
+  -c /tmp/wrapped_key.ctx
+
+# Sign a test message
+echo "wrapped-key-test" > /tmp/wk_test.txt
+sudo tpm2_sign \
+  -c /tmp/wrapped_key.ctx \
+  -g sha256 \
+  -s rsassa \
+  -f plain \
+  -o /tmp/wk_test.sig \
+  /tmp/wk_test.txt
+
+# Extract public key and verify with OpenSSL
+sudo tpm2_readpublic -c /tmp/wrapped_key.ctx -f pem -o /tmp/wk_test.pem > /dev/null 2>&1
+sudo chmod 644 /tmp/wk_test.sig /tmp/wk_test.pem
+
+openssl dgst -sha256 \
+  -verify /tmp/wk_test.pem \
+  -signature /tmp/wk_test.sig \
+  /tmp/wk_test.txt
+```
+
+**Expected output:**
+```
+Verified OK
+```
+
+**Key point:** The private key never exists in plaintext outside the TPM. The `.priv` blob on disk is only useful when loaded through the SRK on this specific TPM.
