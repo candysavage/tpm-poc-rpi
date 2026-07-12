@@ -38,14 +38,17 @@ secure-embedded-platform/
 ├── README.md                   ← this file
 ├── phase1/
 │   └── README.md               ← Raspberry Pi OS setup, wiring, provisioning, attestation
+├── phase2/
+│   ├── README.md               ← Yocto image, TPM overlay, what's verified working
+│   ├── local.conf.snippet      ← TPM-relevant local.conf additions
+│   ├── bblayers.conf.snippet   ← required layer list
+│   └── meta-custom/            ← custom layer: TPM device tree overlay recipe
 ├── certs/
 │   ├── ek_cert_rsa.der         ← Infineon-issued RSA EK certificate
 │   └── ek_cert_ecc.der         ← Infineon-issued ECC EK certificate
 └── scripts/
     └── attest.sh               ← full attestation flow (local + PCR)
 ```
-
-Phase 2 (Yocto) documentation will be added as that work progresses.
 
 ---
 
@@ -119,11 +122,14 @@ sudo ./scripts/attest.sh clean    # remove temp files
 - [x] Key wrapping demo (child key created, stored on disk, loaded on demand)
 
 ### Phase 2 — Yocto 🔲
-- [ ] Custom Yocto image with `meta-raspberrypi` + `meta-security`
-- [ ] Custom DTS for SLB9673 over SPI (remove I2C dependency)
-- [ ] `tpm2-tss`, `tpm2-tools`, `tpm2-abrmd` baked into image
+- [x] Custom Yocto image with `meta-raspberrypi` + `meta-security`, builds and boots on RPi4
+- [x] Custom device tree overlay for SLB9673 (I2C — no stock overlay exists; SPI deprioritized, I2C works fine)
+- [x] `tpm2-tss`, `tpm2-tools`, `tpm2-abrmd` baked into image, `abrmd` running at boot under busybox init
+- [x] Key hierarchy (EK/SRK/AK) provisioned and persisted on the Yocto image
 - [ ] Measured boot with PCR extension at boot time
 - [ ] Reference: [embetrix/meta-raspberrypi-secure](https://github.com/embetrix/meta-raspberrypi-secure)
+
+See [phase2/README.md](phase2/README.md) for the full writeup.
 
 ---
 

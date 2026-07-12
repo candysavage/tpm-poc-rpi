@@ -1,0 +1,17 @@
+# Layers required in build/conf/bblayers.conf, in addition to poky/meta,
+# poky/meta-poky, poky/meta-yocto-bsp.
+#
+# meta-oe and meta-python are dependencies of meta-security/meta-tpm, not
+# used directly here.
+
+BBLAYERS ?= " \
+  ${TOPDIR}/../poky/meta \
+  ${TOPDIR}/../poky/meta-poky \
+  ${TOPDIR}/../poky/meta-yocto-bsp \
+  ${TOPDIR}/../meta-openembedded/meta-oe \
+  ${TOPDIR}/../meta-openembedded/meta-python \
+  ${TOPDIR}/../meta-raspberrypi \
+  ${TOPDIR}/../meta-security \
+  ${TOPDIR}/../meta-security/meta-tpm \
+  ${TOPDIR}/../meta-custom \
+  "

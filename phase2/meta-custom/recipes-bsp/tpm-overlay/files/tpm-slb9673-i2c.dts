@@ -1,0 +1,21 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "brcm,bcm2711";
+
+    fragment@0 {
+        target = <&i2c1>;
+        __overlay__ {
+            #address-cells = <1>;
+            #size-cells = <0>;
+            status = "okay";
+
+            tpm: tpm@2e {
+                compatible = "infineon,slb9673", "tcg,tpm-tis-i2c";
+                reg = <0x2e>;
+                status = "okay";
+            };
+        };
+    };
+};

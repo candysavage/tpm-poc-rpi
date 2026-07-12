@@ -1,0 +1,28 @@
+# TPM/security-relevant additions for build/conf/local.conf
+# (Extracted from the working local.conf — WiFi-specific lines omitted,
+#  they were a side addition for this specific setup, not required for the TPM.)
+
+MACHINE = "raspberrypi4-64"
+DISTRO  = "poky"
+
+# Pull in TCG/IMA-aware recipe logic from meta-security and meta-security/meta-tpm
+DISTRO_FEATURES:append = " security tpm2 ima"
+MACHINE_FEATURES:append = " tpm2"
+
+IMAGE_INSTALL:append = " \
+    libtss2-tcti-device \
+    tpm2-tss \
+    tpm2-tools \
+    tpm2-abrmd \
+    kernel-modules \
+    kernel-devicetree \
+"
+
+# --- Custom TPM overlay (see meta-custom/recipes-bsp/tpm-overlay) ---
+# There is no stock device-tree overlay for the Infineon SLB9673 in
+# meta-raspberrypi. dtoverlay=tpm-slb9673 (a guess at a stock name) does NOT
+# exist and will not work. The overlay below is hand-written and compiled by
+# the tpm-overlay_1.0.bb recipe in this layer.
+RPI_EXTRA_CONFIG = 'dtoverlay=tpm-slb9673-i2c\ndtparam=i2c_arm=on'
+RPI_EXTRA_IMAGE_BOOT_FILES:append = " tpm-slb9673-i2c.dtbo;overlays/tpm-slb9673-i2c.dtbo"
+EXTRA_IMAGEDEPENDS:append = " tpm-overlay"
