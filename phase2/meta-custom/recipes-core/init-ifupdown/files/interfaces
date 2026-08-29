@@ -1,0 +1,46 @@
+# /etc/network/interfaces -- configuration file for ifup(8), ifdown(8)
+
+# The loopback interface
+auto lo
+iface lo inet loopback
+
+# Wireless interfaces
+iface wlan0 inet dhcp
+	wireless_mode managed
+	wireless_essid any
+	wpa-driver wext
+	wpa-conf /etc/wpa_supplicant.conf
+
+iface atml0 inet dhcp
+
+# eth0: static, not dhcp — this project's eth0 is a direct point-to-point
+# cable to a verifier machine for remote-attestation testing (see
+# phase2/README.md's Remote Attestation section), not a router uplink. No
+# DHCP server exists on that link, so dhcp here would just hang forever
+# waiting for an offer that's never coming (confirmed on real hardware,
+# 2026-08-29 — this is what motivated baking in a static address instead
+# of re-running `ip addr add` by hand after every power cycle).
+# Matches the verifier side's own static address, 192.168.100.1/24 (set
+# manually on that machine, not part of this build) — see
+# scripts/attest-remote-verify.sh in the docs repo for the actual usage.
+auto eth0
+iface eth0 inet static
+	address 192.168.100.2
+	netmask 255.255.255.0
+
+iface eth1 inet dhcp
+
+# Busybox ifupdown won't process /en* correctly
+auto /en*=eth
+iface eth inet dhcp
+
+# Ethernet/RNDIS gadget (g_ether)
+# ... or on host side, usbnet and random hwaddr
+iface usb0 inet static
+	address 192.168.7.2
+	netmask 255.255.255.0
+	network 192.168.7.0
+	gateway 192.168.7.1
+
+# Bluetooth networking
+iface bnep0 inet dhcp

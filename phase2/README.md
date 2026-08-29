@@ -252,9 +252,13 @@ Anyone can SSH in and run `tpm2_pcrread` — that just prints numbers a compromi
 - **AK enrollment**: trust-on-first-contact — the verifier fetches and caches the AK public key the first time it talks to a given device. A hardened version would validate the AK chains back to the EK/manufacturer CA (already extracted in Phase 1 — `certs/ek_cert_rsa.der`/`ek_cert_ecc.der`) via a secure, out-of-band enrollment step first. Documented as a deliberate scope limitation, not an oversight — listed in [Remaining work](#remaining-work).
 - **PCR value decoding**: an earlier version of the verifier script read PCR values via a second, independent `tpm2_pcrread` call instead of extracting them from the already-verified quote data — a real (if narrow) gap, since that second read isn't covered by the signature check. Fixed by generating the quote with `tpm2_quote -F values` (a flat, headerless concatenation of the selected PCR digests) and verifying with `tpm2_checkquote -l <pcr-list>`, which makes `checkquote` parse that same format — confirmed against tpm2-tools 5.7's actual source (`tools/misc/tpm2_checkquote.c`) that this is a genuine alternate parser feeding the identical cryptographic check, not a bypass. PCR values are then decoded directly from the file `checkquote` already validated, not a separate side channel.
 
+### Networking
+
+`eth0` gets a static `192.168.100.2/24` (`meta-custom/recipes-core/init-ifupdown/`, overriding the stock `dhcp` stanza) — not a router uplink, a **direct point-to-point cable** to whichever machine runs the verifier script, which needs its own static `192.168.100.1` on the matching interface (not part of this image; set that up on the verifier machine itself, e.g. `sudo ip addr add 192.168.100.1/24 dev <iface>`, non-persistent unless you configure it there too). No DHCP server exists on a direct link like this — confirmed on real hardware, `dhcp` there just hangs forever waiting for an offer that's never coming. Baking in the static address means the Pi is reachable immediately on boot, no manual `ip addr add` needed after every power cycle.
+
 ### Verified working (2026-08-29)
 
-Script: [`scripts/attest-remote-verify.sh`](../scripts/attest-remote-verify.sh). Run from a separate machine on the same network as the Pi:
+Script: [`scripts/attest-remote-verify.sh`](../scripts/attest-remote-verify.sh). Run from the verifier machine:
 
 ```bash
 ./scripts/attest-remote-verify.sh <pi-ip>
