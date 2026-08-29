@@ -59,8 +59,18 @@ GOLDEN_PCR10="${GOLDEN_DIR}/pcr10-golden.txt"
 # identical across two genuine power cycles, 2026-08-29. These change only
 # if the boot chain itself changes (new kernel, new bootargs, new U-Boot
 # build) — update here if that ever happens deliberately.
-GOLDEN_PCR1="0x679A7CA3A0C4A650097ADD413232EEAD591FD499149FB3A4ECA996C8F50123D8"
-GOLDEN_PCR8="0xA3156994D6D346537DA65D7C8DACD8FFBAD11505B10F7B13396B8660BFF05AAF"
+#
+# Re-baselined 2026-08-29 (same day): the original values above were
+# captured before the IMA work landed. Adding ima_policy=tcb to the kernel
+# command line changed bootargs (PCR 1), and the kernel rebuild to add
+# CONFIG_IMA=y etc. changed the kernel image itself (PCR 8) — both
+# legitimate, expected changes to the actual boot chain, not drift or
+# tampering. First caught by this very script correctly flagging a
+# mismatch against the stale baseline; the new values were then confirmed
+# identical across two genuine power cycles before being trusted here,
+# same standard as the original baseline.
+GOLDEN_PCR1="0x1872401838DC0197D6499A2950DD20A9400067441ED311E37095A9725B1B2AC8"
+GOLDEN_PCR8="0x208261DF4C05E875E696FBEF1A4801FA9C13A3F9C6B3680967647196F3815708"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'

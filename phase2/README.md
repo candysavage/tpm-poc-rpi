@@ -1,7 +1,7 @@
 # Secure Embedded Platform — Phase 2: Yocto Image
 
 > **Goal:** Replace Raspberry Pi OS (Phase 1) with a custom Yocto image that reproduces the same TPM stack — detection, key hierarchy, attestation — as a minimal, purpose-built image, then extend it with measured boot.
-> **Status:** Full pre-boot-to-userspace measured-boot chain working and verified on real hardware — U-Boot measures bootargs and the kernel image into the TPM before Linux starts (PCR 1/8, deterministic across genuine power cycles), and the kernel's IMA subsystem continues measuring userspace into PCR 10 after boot. Remaining work: a networked remote-attestation demo. See [Measured Boot](#measured-boot) and [IMA](#ima--pcr-10) below.
+> **Status:** Full pre-boot-to-userspace measured-boot chain working and verified on real hardware — U-Boot measures bootargs and the kernel image into the TPM before Linux starts (PCR 1/8, deterministic across genuine power cycles), the kernel's IMA subsystem continues measuring userspace into PCR 10 after boot, and a remote verifier can cryptographically challenge the device over the network and confirm its state matches the known-good baseline. See [Measured Boot](#measured-boot), [IMA](#ima--pcr-10), and [Remote Attestation](#remote-attestation) below.
 
 ---
 
@@ -143,7 +143,7 @@ tpm2_getcap handles-persistent
 | 8 | U-Boot boots via `bootm`+FIT, measures bootargs → PCR 1 and kernel image → PCR 8 | ✅ |
 | 9 | Deterministic PCR baseline confirmed across genuine power cycles | ✅ |
 | 10 | IMA — kernel-side userspace measurement into PCR 10, continuing the chain past U-Boot | ✅ |
-| 11 | Networked remote attestation (verifier ↔ device, nonce-anchored AK-signed quote) | 🔲 |
+| 11 | Networked remote attestation (verifier ↔ device, nonce-anchored AK-signed quote) | ✅ |
 
 ---
 
@@ -195,16 +195,16 @@ Wiring (RPi4, bit-banged SPI via `spi-gpio`):
 - `meta-custom/recipes-bsp/rpi-u-boot-scr/` — custom boot script staging the FIT at a separate scratch address (`0x04000000`) from the kernel's own decompression target (`0x200000`)
 - `meta-custom/recipes-kernel/linux/` — TPM/SPI drivers forced builtin, `UBOOT_ENTRYPOINT`/`UBOOT_LOADADDRESS` corrected to the proper 2MB-aligned aarch64 address
 
-### Verified golden PCR baseline (2026-08-29)
+### Verified golden PCR baseline (2026-08-29, re-baselined same day after IMA landed)
 
 Confirmed **identical across two genuine power cycles** of the same unchanged image:
 
 ```
-PCR 1 (sha256): 679A7CA3A0C4A650097ADD413232EEAD591FD499149FB3A4ECA996C8F50123D8
-PCR 8 (sha256): A3156994D6D346537DA65D7C8DACD8FFBAD11505B10F7B13396B8660BFF05AAF
+PCR 1 (sha256): 1872401838DC0197D6499A2950DD20A9400067441ED311E37095A9725B1B2AC8
+PCR 8 (sha256): 208261DF4C05E875E696FBEF1A4801FA9C13A3F9C6B3680967647196F3815708
 ```
 
-This is the reference a remote-attestation verifier would check a quote's PCR values against — see [Remaining work](#remaining-work).
+This is the reference the remote-attestation verifier (below) checks a quote's PCR values against. Note these differ from the values first captured earlier the same day — expected: adding `ima_policy=tcb` to the kernel command line changed bootargs (PCR 1), and the kernel rebuild for `CONFIG_IMA=y` changed the kernel image itself (PCR 8). Both legitimate changes to the actual boot chain, first caught by the attestation script itself correctly flagging a mismatch against the stale baseline, then re-confirmed deterministic across two fresh power cycles before being trusted as the new reference — same rigor as the original baseline.
 
 **Critical testing-methodology note, learned the hard way:** PLT_RST is deliberately left floating (see Hardware above). Per the TPM2 spec, the *static* PCRs (0–16) only reset on an actual hardware reset signal to the chip — not a warm Linux `reboot`, not U-Boot's software `reset` command. A large chunk of this section's debugging time went into what looked like non-deterministic PCR values across "reboots" that were actually just extends silently accumulating on top of un-reset state. **Always fully power-cycle (unplug, wait, replug) before comparing PCR readings on this hardware** — a warm reboot proves nothing about determinism here.
 
@@ -227,9 +227,54 @@ Two Kconfig gotchas worth remembering for any future work on this tree: (a) when
 
 ### Remaining work
 
-- [ ] **Remote attestation demo**: extend the existing Phase 1 local nonce-sign/PCR-23-quote-and-verify flow into a real network round-trip — verifier sends a nonce → device returns an AK-signed quote over PCR 1/8/10 → verifier checks the signature (chains to the already-extracted Infineon CA from Phase 1), nonce freshness, and PCR values against the golden baseline above. Doesn't need to be production-hardened, just needs to close the loop end-to-end. Note PCR 10's golden value isn't a fixed constant the way PCR 1/8 are — see [IMA](#ima--pcr-10).
 - [ ] TPM event log: currently U-Boot-side-only scratch RAM, not backed by a proper `/reserved-memory` device-tree region, so not readable from Linux (`tpm2_eventlog`) without further work — either wire that up properly or document it as a deliberate, honestly-scoped limitation
 - [ ] Explicit threat-model/limitations section for the thesis document itself: no hardware CRTM on RPi4 (this is a *logical* SRTM demonstration, not a true TCG PC Client chain), PLT_RST floating (documented tradeoff, not an oversight), devicetree measurement deliberately disabled (documented above), measured boot alone doesn't stop replay of an old-but-valid state
+- [ ] AK-to-EK-to-manufacturer-CA chain validation — the remote-attestation verifier currently trusts the AK on first contact rather than validating it chains back to the already-extracted Infineon CA (Phase 1); see [Remote Attestation](#remote-attestation) for the exact scope note
+
+---
+
+## Remote Attestation
+
+Extends Phase 1's local nonce-sign/PCR-quote-and-verify demo into a real network round-trip: a separate verifier machine challenges the Pi over SSH for a TPM quote, and cryptographically confirms the device's identity, the freshness of the response, and its PCR state — without trusting anything the device's own OS says about itself.
+
+### Why a TPM quote proves something a plain PCR read doesn't
+
+Anyone can SSH in and run `tpm2_pcrread` — that just prints numbers a compromised OS could lie about. A **quote** is different: the TPM chip itself (not the OS) bundles the current PCR values with a caller-supplied nonce and signs the bundle with the AK's private key, which never leaves the chip. A compromised kernel can't forge that signature, because it never has access to the key used to produce it.
+
+- **Authenticity** — the verifier already holds the AK's public key (fetched once, cached, reused thereafter — the AK is a persistent handle, unchanged across boots). If the signature checks out, the quote really was produced by the physical chip that AK was generated inside back in Phase 1.
+- **Freshness (anti-replay)** — every run generates a fresh random nonce, baked into the signed bundle. A captured old quote can't be replayed later; the nonce won't match.
+- **Integrity** — once authenticity and freshness are established, the PCR values inside the quote are trustworthy too, and get checked against the golden baseline above.
+
+### Design decisions
+
+- **Transport: SSH**, not a custom listener. `sshd` was already running and proven; this needed no image rebuild and no new services.
+- **PCR 10 handling**: unlike PCR 1/8 (fixed at boot), PCR 10 changes continuously as IMA measures every executed program — there's no single fixed "golden" value. The verifier captures the first-observed PCR 10 as a per-session baseline and treats later drift as a warning, not a failure.
+- **AK enrollment**: trust-on-first-contact — the verifier fetches and caches the AK public key the first time it talks to a given device. A hardened version would validate the AK chains back to the EK/manufacturer CA (already extracted in Phase 1 — `certs/ek_cert_rsa.der`/`ek_cert_ecc.der`) via a secure, out-of-band enrollment step first. Documented as a deliberate scope limitation, not an oversight — listed in [Remaining work](#remaining-work).
+- **PCR value decoding**: an earlier version of the verifier script read PCR values via a second, independent `tpm2_pcrread` call instead of extracting them from the already-verified quote data — a real (if narrow) gap, since that second read isn't covered by the signature check. Fixed by generating the quote with `tpm2_quote -F values` (a flat, headerless concatenation of the selected PCR digests) and verifying with `tpm2_checkquote -l <pcr-list>`, which makes `checkquote` parse that same format — confirmed against tpm2-tools 5.7's actual source (`tools/misc/tpm2_checkquote.c`) that this is a genuine alternate parser feeding the identical cryptographic check, not a bypass. PCR values are then decoded directly from the file `checkquote` already validated, not a separate side channel.
+
+### Verified working (2026-08-29)
+
+Script: [`scripts/attest-remote-verify.sh`](../scripts/attest-remote-verify.sh). Run from a separate machine on the same network as the Pi:
+
+```bash
+./scripts/attest-remote-verify.sh <pi-ip>
+```
+
+```
+[PASS] AK public key saved — reused on every future run
+[INFO] Nonce: 228b32be0399b94d81765a6bd6d7505699fbeee7
+[PASS] Quote generated on device
+[PASS] Quote files retrieved
+[PASS] Quote signature verified — genuinely signed by this device's AK, over this exact nonce
+[PASS] PCR 1 (bootargs) matches golden baseline
+[PASS] PCR 8 (kernel image) matches golden baseline
+[INFO] No PCR 10 baseline captured yet — saved this reading as the baseline for future comparisons
+[PASS] Remote attestation SUCCEEDED — device identity + PCR state cryptographically verified
+```
+
+A second run against the same boot session additionally shows `PCR 10 (IMA) matches this session's captured baseline` — confirming the per-session PCR 10 comparison path also works as designed.
+
+**How the golden baseline got re-established, itself a good demonstration of the mechanism:** the first live run against real hardware correctly *failed* — PCR 1 and PCR 8 both differed from the values captured earlier the same day, because the intervening IMA work had changed both the kernel command line and the compiled kernel image. That's the attestation script doing exactly its job: detecting that the device's measured state no longer matches the last known-good reference. Since the change was a deliberate, understood update (not tampering), the new values were re-confirmed deterministic across two genuine power cycles and adopted as the new golden baseline — see the note above.
 
 ---
 

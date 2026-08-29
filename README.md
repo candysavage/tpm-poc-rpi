@@ -128,7 +128,7 @@ sudo ./scripts/attest.sh clean    # remove temp files
 - [x] Key hierarchy (EK/SRK/AK) provisioned and persisted on the Yocto image, on both TPM chips
 - [x] **Measured boot: U-Boot → FIT → Linux chain fully working and verified.** U-Boot measures bootargs (PCR 1) and the kernel image (PCR 8) into the TPM before Linux starts; a deterministic golden PCR baseline is confirmed across genuine power cycles. Ten distinct bugs found and fixed across the firmware/bootloader/kernel/build-system stack to get there — see `phase2/README.md`'s [Measured Boot](phase2/README.md#measured-boot) section for the full technical writeup.
 - [x] **IMA (PCR 10) — kernel-side userspace measurement, working and verified.** Completes the pre-boot-to-userspace measured-boot chain: U-Boot (PCR 1/8) → kernel IMA (PCR 10). Configured by hand rather than via `meta-security/meta-integrity`'s own automation, which targets `linux-yocto`/systemd — neither used by this project.
-- [ ] Remote attestation demo — networked extension of Phase 1's local quote/verify flow
+- [x] **Remote attestation — working and verified against real hardware over a live network link.** A separate verifier machine challenges the Pi over SSH for an AK-signed TPM quote, confirms the signature and nonce freshness, and checks PCR 1/8/10 against the golden baseline. Along the way, the script itself correctly caught a real state change (the IMA work altering bootargs/kernel image) as a legitimate baseline update rather than silently ignoring it — see `phase2/README.md`'s [Remote Attestation](phase2/README.md#remote-attestation) section.
 - [ ] Reference: [embetrix/meta-raspberrypi-secure](https://github.com/embetrix/meta-raspberrypi-secure)
 
 See [phase2/README.md](phase2/README.md) for the full writeup.
