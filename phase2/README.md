@@ -1,7 +1,7 @@
 # Secure Embedded Platform — Phase 2: Yocto Image
 
 > **Goal:** Replace Raspberry Pi OS (Phase 1) with a custom Yocto image that reproduces the same TPM stack — detection, key hierarchy, attestation — as a minimal, purpose-built image, then extend it with measured boot.
-> **Status:** Full measured-boot chain working and verified on real hardware — U-Boot measures bootargs and the kernel image into the TPM before Linux starts, with a confirmed deterministic PCR baseline across genuine power cycles. Remaining work: IMA (PCR 10, kernel→userspace continuation of the chain) and a networked remote-attestation demo. See [Measured Boot](#measured-boot) below.
+> **Status:** Full pre-boot-to-userspace measured-boot chain working and verified on real hardware — U-Boot measures bootargs and the kernel image into the TPM before Linux starts (PCR 1/8, deterministic across genuine power cycles), and the kernel's IMA subsystem continues measuring userspace into PCR 10 after boot. Remaining work: a networked remote-attestation demo. See [Measured Boot](#measured-boot) and [IMA](#ima--pcr-10) below.
 
 ---
 
@@ -18,10 +18,11 @@ Layers used (see [`bblayers.conf.snippet`](bblayers.conf.snippet)):
 | Layer | Purpose |
 |---|---|
 | `poky/meta`, `meta-poky`, `meta-yocto-bsp` | Base Yocto/Poky |
-| `meta-openembedded/meta-oe`, `meta-python` | Dependencies of `meta-security`/`meta-tpm` |
+| `meta-openembedded/meta-oe`, `meta-python`, `meta-networking` | Dependencies of `meta-security`/`meta-tpm` |
 | `meta-raspberrypi` | RPi4 BSP |
 | `meta-security` + `meta-security/meta-tpm` | TPM2 stack recipes (`tpm2-tss`, `tpm2-tools`, `tpm2-abrmd`) |
-| [`meta-custom`](meta-custom/) | This project's own layer — TPM overlays, U-Boot/kernel measured-boot config |
+| `meta-security/meta-integrity` | Only for its `ima-evm-utils` recipe (`evmctl`) — its own kernel-config/policy-loading automation doesn't apply here, see [IMA](#ima--pcr-10) |
+| [`meta-custom`](meta-custom/) | This project's own layer — TPM overlays, U-Boot/kernel measured-boot config, IMA config |
 
 This repo's [`meta-custom`](meta-custom/) contains only the TPM/measured-boot-relevant recipes from the working build tree. WiFi provisioning (wpa_supplicant config, Broadcom firmware) was set up in this specific environment too but is unrelated to the TPM work and is omitted here. The full, live build tree (including the upstream layers themselves, as git submodules) is tracked separately at `~/yocto/tpm-poc-rpi/` — this repo is the documentation/narrative side, not the build source of truth.
 
@@ -141,7 +142,7 @@ tpm2_getcap handles-persistent
 | 7 | Xenon SLB9670 board wired via bit-banged SPI, detected, key hierarchy provisioned | ✅ |
 | 8 | U-Boot boots via `bootm`+FIT, measures bootargs → PCR 1 and kernel image → PCR 8 | ✅ |
 | 9 | Deterministic PCR baseline confirmed across genuine power cycles | ✅ |
-| 10 | IMA — kernel-side userspace measurement into PCR 10, continuing the chain past U-Boot | 🔲 |
+| 10 | IMA — kernel-side userspace measurement into PCR 10, continuing the chain past U-Boot | ✅ |
 | 11 | Networked remote attestation (verifier ↔ device, nonce-anchored AK-signed quote) | 🔲 |
 
 ---
@@ -180,7 +181,7 @@ Wiring (RPi4, bit-banged SPI via `spi-gpio`):
 |---|---|---|
 | 1 | U-Boot, bootargs hash | Deterministic — confirmed identical across genuine power cycles |
 | 8 | U-Boot, kernel image hash | Deterministic — confirmed identical across genuine power cycles |
-| 10 | Kernel IMA, userspace measurements (not yet implemented) | Standard TCG PC Client convention for OS-controlled PCRs |
+| 10 | Kernel IMA, userspace measurements | Standard TCG PC Client convention for OS-controlled PCRs — see [IMA](#ima--pcr-10) |
 | 23 | Existing Phase 1/2 manual demo | Unchanged, kept as-is |
 
 **PCR 0 (devicetree) was in the original plan but is deliberately *not* measured.** See the debugging notes below for why — short version: the RPi firmware injects a fresh random `kaslr-seed` into the devicetree on every boot, which makes whole-devicetree measurement (`CONFIG_MEASURE_DEVICETREE`) non-deterministic by construction. U-Boot's own Kconfig help text explicitly warns about this exact scenario. Framed honestly in this project as a real hardware/firmware limitation, not a gap — the same class of problem is why RPi4 has no real hardware CRTM either: it's a platform without full TCG PC Client compliance, and this project is explicit about which parts of the chain that affects.
@@ -226,9 +227,69 @@ Two Kconfig gotchas worth remembering for any future work on this tree: (a) when
 
 ### Remaining work
 
-- [ ] Add `meta-security/meta-integrity` to `bblayers.conf`, configure an IMA policy, validate PCR 10 — the biggest remaining real gap, continues the chain from U-Boot into userspace
+- [ ] **Remote attestation demo**: extend the existing Phase 1 local nonce-sign/PCR-23-quote-and-verify flow into a real network round-trip — verifier sends a nonce → device returns an AK-signed quote over PCR 1/8/10 → verifier checks the signature (chains to the already-extracted Infineon CA from Phase 1), nonce freshness, and PCR values against the golden baseline above. Doesn't need to be production-hardened, just needs to close the loop end-to-end. Note PCR 10's golden value isn't a fixed constant the way PCR 1/8 are — see [IMA](#ima--pcr-10).
 - [ ] TPM event log: currently U-Boot-side-only scratch RAM, not backed by a proper `/reserved-memory` device-tree region, so not readable from Linux (`tpm2_eventlog`) without further work — either wire that up properly or document it as a deliberate, honestly-scoped limitation
-- [ ] **Remote attestation demo**: extend the existing Phase 1 local nonce-sign/PCR-23-quote-and-verify flow into a real network round-trip — verifier sends a nonce → device returns an AK-signed quote over PCR 1/8/(10) → verifier checks the signature (chains to the already-extracted Infineon CA from Phase 1), nonce freshness, and PCR values against the golden baseline above. Doesn't need to be production-hardened, just needs to close the loop end-to-end.
 - [ ] Explicit threat-model/limitations section for the thesis document itself: no hardware CRTM on RPi4 (this is a *logical* SRTM demonstration, not a true TCG PC Client chain), PLT_RST floating (documented tradeoff, not an oversight), devicetree measurement deliberately disabled (documented above), measured boot alone doesn't stop replay of an old-but-valid state
+
+---
+
+## IMA — PCR 10
+
+Continues the measurement chain from U-Boot's pre-boot work into the kernel's own runtime: the IMA (Integrity Measurement Architecture) subsystem hashes every executed program, mmap'd-for-exec file, and root-read file, extending PCR 10 for each one and keeping a parallel human-readable log in `securityfs`.
+
+**`meta-security/meta-integrity`'s own automation doesn't apply to this project.** Its kernel-config bbappend (`linux-yocto%.bbappend`) only matches `linux-yocto*` recipes — this project uses `linux-raspberrypi`. Its policy-loading mechanism is a systemd service — this image runs busybox init. Both silently inapplicable, not broken; confirmed by reading the actual files rather than assuming the layer would "just work" once added to `bblayers.conf`. IMA is configured by hand instead:
+
+- `meta-custom/recipes-kernel/linux/linux/ima.cfg` — `CONFIG_IMA=y` plus sub-options, every one verified against this exact kernel's own `security/integrity/ima/Kconfig` before writing the fragment (same discipline the measured-boot debugging journey above eventually settled into — applied from the start here, and it paid off: **this kernel defaults IMA to SHA1**, which would have been a real, easy-to-miss inconsistency with every other SHA256 PCR/quote in this project. Caught by reading source, not assumed.
+- `CONFIG_IMA_APPRAISE` deliberately left off — measurement only, consistent with the project's "detect, don't enforce" scope (matches the unsigned-FIT U-Boot decision).
+- Policy: the kernel's builtin **`ima_policy=tcb`** boot parameter (`local.conf`'s `CMDLINE:append`) — measures programs run/mmap'd-for-exec and files read by `uid=0`/`euid=0`. Chosen specifically to need no userspace policy-loading step, sidestepping meta-integrity's systemd-based approach entirely.
+- `meta-security/meta-integrity` is in `bblayers.conf` purely for its `ima-evm-utils` recipe (`evmctl`) — confirmed its `REQUIRED_DISTRO_FEATURES` is just `"ima"` (already present) before adding it, not `"integrity"`. `"integrity"` was added to `DISTRO_FEATURES` anyway, purely to silence the layer's own cosmetic sanity-check warning — zero functional effect.
+
+### Verified working (2026-08-29, first boot after the build — no debugging needed)
+
+```bash
+dmesg | grep -i ima
+```
+```
+ima: Allocated hash algorithm: sha256
+ima: No architecture policies found
+```
+> The second line is expected/harmless — it's about `CONFIG_IMA_ARCH_POLICY`, not enabled here, unrelated to the builtin `tcb` policy actually in use.
+
+```bash
+cat /sys/kernel/security/ima/policy
+```
+```
+measure func=MMAP_CHECK mask=MAY_EXEC
+measure func=BPRM_CHECK mask=MAY_EXEC
+measure func=FILE_CHECK mask=^MAY_READ euid=0
+measure func=FILE_CHECK mask=^MAY_READ uid=0
+measure func=MODULE_CHECK
+measure func=FIRMWARE_CHECK
+measure func=POLICY_CHECK
+```
+(plus a block of `dont_measure fsmagic=...` lines excluding pseudo-filesystems — proc, sysfs, cgroup, etc.)
+
+```bash
+cat /sys/kernel/security/ima/ascii_runtime_measurements | tail -5
+```
+```
+10 8a07230eaa15a29758948e9ecc34319fab650c10 ima-ng sha256:d1992ff6ac5beb7ea77ae32841538b9b8b8e6c55190be257296741c88c0da203 /etc/securetty
+10 879614a97374eeab1fb579765b52437d724a8f31 ima-ng sha256:498cd2a39fd254eeff87a627291a39db405635f43f406fd5f698331ca2176034 /etc/shadow
+10 97c602a4d581c657fdef61b9e3515aede7a4a089 ima-ng sha256:516ff71e65a80125307cabd2e1d99179232f600a7938ebacd36b8b0c0af18d58 /etc/login.access
+10 6011fe89219293e10e6fd5432ab5acc45b67bc0c ima-ng sha256:0ab9dc72eeefb8ca403b4a4efa6abce1af3619a018b2700ee606d5be365d39e5 /etc/motd
+10 676a7127a3dcae136ec8cdb0fc2d1a2d07a9c73d ima-ng sha256:740350672efd79493381d45565c7a708044b51d2b2c00f4647a1f6e87662b2d1 /etc/profile
+```
+
+```bash
+tpm2_pcrread sha256:10
+```
+```
+10 : 0xB3F369CB826EA1379B57EFC8182E8F71E892DFB2206423E68F2EA548F4515C8D
+```
+Genuine, non-zero — confirms IMA is actually extending the TPM, not just keeping an internal-only measurement list.
+
+### Important nuance for remote attestation
+
+Unlike PCR 1/8 (fixed once at boot, stays constant), **PCR 10 keeps changing for as long as the system runs** — IMA measures every executed program, so interactive shell commands (`cat`, `dmesg`, the very commands used to check the above) are themselves measured into it. There's no single fixed "golden" PCR 10 value the way PCR 1/8 have one; a golden baseline here means "the expected value immediately after boot, before interactive use." The remote-attestation verifier needs to account for this — e.g. by quoting PCR 10 at a defined checkpoint (right after boot, before shell access) — rather than treating it like a fixed constant.
 
 Reference: [embetrix/meta-raspberrypi-secure](https://github.com/embetrix/meta-raspberrypi-secure), [wxleong/tpm2-uboot-rpi4](https://github.com/wxleong/tpm2-uboot-rpi4), [ejaaskel/meta-slb9670-rpi](https://github.com/ejaaskel/meta-slb9670-rpi) (branch `scarthgap-measured-boot-raspberrypi4-4gb`) — studied and adapted, not blindly copied; none of them matched this exact combination of `scarthgap` + hand-wired Xenon board + bit-banged SPI + aarch64, which is why the debugging journey above was necessary rather than a known recipe.

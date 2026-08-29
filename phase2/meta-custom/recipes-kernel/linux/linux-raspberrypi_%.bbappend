@@ -1,6 +1,7 @@
 FILESEXTRAPATHS:prepend := "${THISDIR}/linux:"
 
 SRC_URI += "file://tpm-spi-builtin.cfg"
+SRC_URI += "file://ima.cfg"
 
 # linux-raspberrypi.inc hardcodes UBOOT_ENTRYPOINT/UBOOT_LOADADDRESS to
 # 0x00008000 (correct for 32-bit raspberrypi4, wrong for aarch64

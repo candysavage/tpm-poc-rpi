@@ -127,7 +127,7 @@ sudo ./scripts/attest.sh clean    # remove temp files
 - [x] `tpm2-tss`, `tpm2-tools`, `tpm2-abrmd` baked into image, `abrmd` running at boot under busybox init
 - [x] Key hierarchy (EK/SRK/AK) provisioned and persisted on the Yocto image, on both TPM chips
 - [x] **Measured boot: U-Boot → FIT → Linux chain fully working and verified.** U-Boot measures bootargs (PCR 1) and the kernel image (PCR 8) into the TPM before Linux starts; a deterministic golden PCR baseline is confirmed across genuine power cycles. Ten distinct bugs found and fixed across the firmware/bootloader/kernel/build-system stack to get there — see `phase2/README.md`'s [Measured Boot](phase2/README.md#measured-boot) section for the full technical writeup.
-- [ ] IMA (PCR 10) — continues the chain from U-Boot into kernel-side userspace measurement, not yet started
+- [x] **IMA (PCR 10) — kernel-side userspace measurement, working and verified.** Completes the pre-boot-to-userspace measured-boot chain: U-Boot (PCR 1/8) → kernel IMA (PCR 10). Configured by hand rather than via `meta-security/meta-integrity`'s own automation, which targets `linux-yocto`/systemd — neither used by this project.
 - [ ] Remote attestation demo — networked extension of Phase 1's local quote/verify flow
 - [ ] Reference: [embetrix/meta-raspberrypi-secure](https://github.com/embetrix/meta-raspberrypi-secure)
 

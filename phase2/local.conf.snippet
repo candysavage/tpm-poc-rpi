@@ -42,10 +42,34 @@ KERNEL_BOOTCMD = "bootm"
 # so a local.conf override loses the precedence fight).
 
 # ─── Distro features ────────────────────────────────────────────────────────
-DISTRO_FEATURES:append = " security tpm2 ima"
+# "integrity" added alongside "ima" for IMA/PCR 10 — purely for
+# correctness/to silence meta-integrity's own sanity-check warning, no
+# functional effect: its automation (linux-yocto kernel bbappend, systemd
+# policy-loading service) targets recipes/init systems this project doesn't
+# use (linux-raspberrypi, busybox init), so IMA is configured manually
+# instead — see meta-custom/recipes-kernel/linux/linux/ima.cfg and the
+# ima_policy=tcb boot param below.
+DISTRO_FEATURES:append = " security tpm2 ima integrity"
 
 # ─── Image features ─────────────────────────────────────────────────────────
 IMAGE_FEATURES += "ssh-server-openssh"
+
+# ─── Kernel command line ────────────────────────────────────────────────────
+# ima_policy=tcb: loads IMA's builtin "tcb" policy at boot — measures all
+# exec'd programs, mmap'd-for-exec files, and root-read files into PCR 10.
+# Measurement only (no ima_appraise=), consistent with this project's
+# "detect, don't enforce" scope. Chosen specifically because it needs no
+# userspace policy-loading step (meta-integrity's own approach relies on a
+# systemd service this busybox-init image doesn't have).
+#
+# Note: CMDLINE:append works here even though meta-raspberrypi's
+# rpi-cmdline.bb assigns the master CMDLINE variable with a plain "="
+# (verified via `bitbake -e rpi-cmdline`) — :append is a deferred,
+# finalization-pass operator that applies regardless of file-parse order,
+# unlike a plain "=" assignment (which follows simple last-one-wins
+# parse-order precedence, and is why UBOOT_ENTRYPOINT above needed a
+# .bbappend instead of a local.conf override).
+CMDLINE:append = " ima_policy=tcb"
 
 # ─── Packages ───────────────────────────────────────────────────────────────
 IMAGE_INSTALL:append = " \
@@ -54,6 +78,7 @@ IMAGE_INSTALL:append = " \
     tpm2-tools \
     tpm2-abrmd \
     kernel-modules \
+    ima-evm-utils \
 "
 
 # ─── RPi hardware ───────────────────────────────────────────────────────────

@@ -1,8 +1,15 @@
 # Layers required in build/conf/bblayers.conf, in addition to poky/meta,
 # poky/meta-poky, poky/meta-yocto-bsp.
 #
-# meta-oe and meta-python are dependencies of meta-security/meta-tpm, not
-# used directly here.
+# meta-oe, meta-python, and meta-networking are dependencies of
+# meta-security/meta-tpm, not used directly here.
+#
+# meta-security/meta-integrity added for IMA/PCR 10 (2026-08-29) — only for
+# its ima-evm-utils recipe (the evmctl tool). Its own kernel-config and
+# policy-loading automation don't apply to this project (targets
+# linux-yocto and systemd; this tree uses linux-raspberrypi and busybox
+# init) — see meta-custom/recipes-kernel/linux/linux/ima.cfg and
+# local.conf.snippet's ima_policy=tcb instead.
 
 BBLAYERS ?= " \
   ${TOPDIR}/../poky/meta \
@@ -10,8 +17,10 @@ BBLAYERS ?= " \
   ${TOPDIR}/../poky/meta-yocto-bsp \
   ${TOPDIR}/../meta-openembedded/meta-oe \
   ${TOPDIR}/../meta-openembedded/meta-python \
+  ${TOPDIR}/../meta-openembedded/meta-networking \
   ${TOPDIR}/../meta-raspberrypi \
   ${TOPDIR}/../meta-security \
   ${TOPDIR}/../meta-security/meta-tpm \
+  ${TOPDIR}/../meta-security/meta-integrity \
   ${TOPDIR}/../meta-custom \
   "
