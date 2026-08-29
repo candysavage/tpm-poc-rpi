@@ -1,7 +1,7 @@
 # Secure Embedded Platform — Phase 2: Yocto Image
 
 > **Goal:** Replace Raspberry Pi OS (Phase 1) with a custom Yocto image that reproduces the same TPM stack — detection, key hierarchy, attestation — as a minimal, purpose-built image, then extend it with measured boot.
-> **Status:** Full pre-boot-to-userspace measured-boot chain working and verified on real hardware — U-Boot measures bootargs and the kernel image into the TPM before Linux starts (PCR 1/8, deterministic across genuine power cycles), the kernel's IMA subsystem continues measuring userspace into PCR 10 after boot, and a remote verifier can cryptographically challenge the device over the network and confirm its state matches the known-good baseline. See [Measured Boot](#measured-boot), [IMA](#ima--pcr-10), and [Remote Attestation](#remote-attestation) below.
+> **Status:** Full pre-boot-to-userspace measured-boot chain working and verified on real hardware — U-Boot measures bootargs and the kernel image into the TPM before Linux starts (PCR 1/8, deterministic across genuine power cycles), the kernel's IMA subsystem continues measuring userspace into PCR 10 after boot, and a remote verifier can cryptographically challenge the device over the network and confirm its state matches the known-good baseline. See [Measured Boot](#measured-boot), [IMA](#ima--pcr-10), and [Remote Attestation](#remote-attestation) below — and [Threat Model & Limitations](#threat-model--limitations) for exactly what this chain does and doesn't prove.
 
 ---
 
@@ -228,8 +228,8 @@ Two Kconfig gotchas worth remembering for any future work on this tree: (a) when
 ### Remaining work
 
 - [ ] TPM event log: currently U-Boot-side-only scratch RAM, not backed by a proper `/reserved-memory` device-tree region, so not readable from Linux (`tpm2_eventlog`) without further work — either wire that up properly or document it as a deliberate, honestly-scoped limitation
-- [ ] Explicit threat-model/limitations section for the thesis document itself: no hardware CRTM on RPi4 (this is a *logical* SRTM demonstration, not a true TCG PC Client chain), PLT_RST floating (documented tradeoff, not an oversight), devicetree measurement deliberately disabled (documented above), measured boot alone doesn't stop replay of an old-but-valid state
-- [ ] AK-to-EK-to-manufacturer-CA chain validation — the remote-attestation verifier currently trusts the AK on first contact rather than validating it chains back to the already-extracted Infineon CA (Phase 1); see [Remote Attestation](#remote-attestation) for the exact scope note
+- [x] Explicit threat-model/limitations section for the thesis document itself — see [Threat Model & Limitations](#threat-model--limitations)
+- [ ] AK-to-EK-to-manufacturer-CA chain validation — the remote-attestation verifier currently trusts the AK on first contact rather than validating it chains back to the already-extracted Infineon CA (Phase 1); see [Threat Model & Limitations](#threat-model--limitations) and [Remote Attestation](#remote-attestation) for the exact scope note
 
 ---
 
@@ -342,3 +342,54 @@ Genuine, non-zero — confirms IMA is actually extending the TPM, not just keepi
 Unlike PCR 1/8 (fixed once at boot, stays constant), **PCR 10 keeps changing for as long as the system runs** — IMA measures every executed program, so interactive shell commands (`cat`, `dmesg`, the very commands used to check the above) are themselves measured into it. There's no single fixed "golden" PCR 10 value the way PCR 1/8 have one; a golden baseline here means "the expected value immediately after boot, before interactive use." The remote-attestation verifier needs to account for this — e.g. by quoting PCR 10 at a defined checkpoint (right after boot, before shell access) — rather than treating it like a fixed constant.
 
 Reference: [embetrix/meta-raspberrypi-secure](https://github.com/embetrix/meta-raspberrypi-secure), [wxleong/tpm2-uboot-rpi4](https://github.com/wxleong/tpm2-uboot-rpi4), [ejaaskel/meta-slb9670-rpi](https://github.com/ejaaskel/meta-slb9670-rpi) (branch `scarthgap-measured-boot-raspberrypi4-4gb`) — studied and adapted, not blindly copied; none of them matched this exact combination of `scarthgap` + hand-wired Xenon board + bit-banged SPI + aarch64, which is why the debugging journey above was necessary rather than a known recipe.
+
+---
+
+## Threat Model & Limitations
+
+Every subsystem above (measured boot, IMA, remote attestation) has been shown to *work*. This section states precisely what "working" proves, to whom, and where the trust chain has real, deliberate gaps — the part of a security project that's easy to skip and the part a thesis committee will actually probe.
+
+### What this system proves, and to whom
+
+A successful `attest-remote-verify.sh` run proves, to the verifier machine, that: a physical TPM whose AK was enrolled in Phase 1 is reachable at the network address it was challenged at; that TPM's static PCR 1/8 hold specific values consistent with a known-good U-Boot bootargs/kernel-image measurement; and PCR 10 holds whatever the kernel's IMA subsystem has measured since boot. All three of those facts are backed by a signature that only the AK's private key — which never leaves the chip — could have produced. That is a real, non-trivial guarantee: a compromised OS cannot fabricate it, because it never has access to the signing key.
+
+It is **not** a proof that the device is trustworthy in any absolute sense. It's a proof that the device's *measured* state matches an *expected* state the verifier was told to expect in advance. Everything below is about the gap between those two things.
+
+### Root of trust: no hardware CRTM
+
+TCG PC Client measured boot formally starts at a **CRTM (Core Root of Trust for Measurement)** — code that is itself immutable (mask ROM, or a boot ROM that hardware-verifies the next stage before running it) and therefore doesn't need to be measured, only trusted by construction. The Raspberry Pi 4's boot ROM has no TPM awareness and, in this project's configuration, does not cryptographically verify the RPi firmware or U-Boot before running them. **U-Boot is the first thing in this chain that ever touches the TPM, and nothing verifies U-Boot itself before it runs.**
+
+Concretely: a malicious replacement of `bootcode.bin`/`start4.elf`/U-Boot on the SD card's boot partition would run without complaint, and *that compromised U-Boot* is what would go on to compute PCR 1/8 measurements — it could simply lie, extending PCRs with the values of the *legitimate* bootargs/kernel while actually booting something else. This is what "no hardware CRTM" means in practice: measured boot on this platform proves the integrity of *everything from U-Boot onward*, not the boot chain as a whole. It is a **logical SRTM (Static Root of Trust for Measurement)** demonstration, not a hardware-anchored one. A production deployment would need RPi4's secure-boot / OTP-fused signature verification (out of scope here) to close this gap; it was scoped out deliberately, not missed.
+
+### PCR reset semantics: PLT_RST left floating
+
+Per the TPM2 spec, the static PCRs (0–16) reset only on `_TPM_Init` — a genuine hardware reset pulse on the TPM's own `PLT_RST` pin. This project's wiring (see [Hardware](#hardware)) leaves `PLT_RST` unconnected, which works fine for detection, provisioning, and measurement, but has one real consequence: **a warm reboot (Linux `reboot`, U-Boot's `reset` command) does not clear PCR 1/8/10.** Extends from the previous boot silently persist and the new boot's measurements pile on top of them. This was originally misdiagnosed as non-deterministic measurements (see debugging-journey items 9–10 above) before being understood as correct TPM behavior given the wiring.
+
+The security implication, not just the debugging one: on this hardware, only a genuine power cycle produces a PCR state a verifier can trust as "this boot's measurements and nothing else." A verifier that accepted a quote after a warm reboot without accounting for this could be looking at stale, accumulated state rather than a fresh measurement of the currently-running system. This project's own testing protocol (full power-cycle before trusting any PCR reading) is the practical mitigation; a hardened deployment would wire `PLT_RST` to the SoC's reset line so this isn't a documentation-only guarantee.
+
+### Devicetree (PCR 0) deliberately unmeasured
+
+Covered above in [PCR allocation](#pcr-allocation): the RPi firmware injects a fresh random `kaslr-seed` into the devicetree every boot, which makes whole-DT measurement non-deterministic by construction — U-Boot's own Kconfig docs warn about exactly this. Disabling it was the correct call for this platform, but it does mean **the devicetree itself — including the TPM overlay's own SPI pin assignments — is outside the measured chain.** A compromised devicetree that, say, rewired which GPIOs U-Boot bit-bangs SPI over would not be caught by anything in this project.
+
+### Boot chain integrity beyond measurement: measured, not enforced
+
+This entire chain is **measured boot, not verified/secure boot.** U-Boot's FIT image is not signed and nothing refuses to boot a modified kernel or a modified bootargs string — the TPM faithfully records whatever ran, it doesn't gate what's allowed to run. A compromised kernel image would simply produce a *different, honestly-reported* PCR 8, which the remote verifier would then correctly flag as a mismatch — but only *after* that kernel already booted and ran. Detection, not prevention. Same logic applies to IMA: `CONFIG_IMA_APPRAISE` is deliberately off (see [IMA](#ima--pcr-10)), so a malicious binary still executes; it's measured into PCR 10, not blocked.
+
+This is a legitimate, common scope choice (measured boot is the standard building block that a verified-boot or appraisal-enforcement layer would sit on top of), but it means the practical value of this whole system is entirely in the verifier catching a mismatch *after the fact* — there is no on-device enforcement anywhere in this chain.
+
+### Attestation freshness vs. continuous trust
+
+The nonce mechanism (see [Remote Attestation](#remote-attestation)) proves a quote is fresh — not a replay of an old, previously-valid response. But freshness only covers the instant of the quote. A device attested as good at time T could be compromised at T+1 (e.g. a remotely-exploited userspace vulnerability that doesn't touch anything IMA measures, like a data-only attack) and would still pass a *new* attestation challenge at T+2, because nothing about that compromise necessarily changes any measured PCR. Attestation answers "does the device's measured state match what I expect right now," not "has this device been continuously trustworthy since boot" or "is this device free of vulnerabilities." This is inherent to measurement-based attestation generally, not a bug specific to this implementation — but it's the kind of claim that's easy to overstate if left unstated.
+
+### AK provenance: trust-on-first-use, not chain-validated
+
+Already flagged as a scope note in the verifier script itself and in [Remote Attestation](#remote-attestation): the verifier caches whatever AK public key a device offers on first contact and never validates that the AK was actually generated inside a TPM whose EK chains back to Infineon's manufacturer CA (the certificates for that chain — `certs/ek_cert_rsa.der`/`ek_cert_ecc.der` — were already extracted in Phase 1 but aren't wired into this check). Practically: the very first enrollment of a given device is unauthenticated — an attacker who could intercept that first contact (e.g. by being on-path for the initial SSH connection, or by substituting a different device claiming to be the Pi) could plant a different AK the verifier would then trust forever after. A real deployment closes this with a secure, out-of-band enrollment step (e.g. validating the EK cert chain once, at provisioning time, before ever trusting a device over the network) — deliberately out of scope for this PoC, not an oversight.
+
+### Physical / hardware caveats
+
+- The bit-banged `spi-gpio` link to the Xenon board is hand-soldered wiring on jumper leads, not a proper board-level connection — the intermittent `-110` timeout / "no device found" failures noted in [Verified Working — SPI TPM](#verified-working--spi-tpm-slb9670) are a real signal-integrity limitation of this specific bring-up, not a protocol-level or software issue. Worth stating plainly: this is prototype-grade physical integration, not something to generalize claims about SPI-TPM reliability from.
+- `PLT_RST` floating (above) also means there's no hardware guarantee against a *physical* attacker briefly power-cycling just the TPM chip (if that were even wireable, which it currently isn't) to selectively reset PCR state independent of the rest of the system — not exploitable given the current wiring, but worth naming as the kind of attack this PCR-reset design is meant to prevent when `PLT_RST` *is* properly connected.
+
+### Summary
+
+None of the above invalidates the working system — it correctly does what measured boot + IMA + remote attestation are supposed to do: produce a cryptographically-backed, tamper-evident record of boot-time and runtime state that a remote party can check without trusting the device's own OS to self-report honestly. The limitations above are about the boundary of that guarantee: it starts at U-Boot (not a hardware CRTM), it detects rather than prevents, it proves a point-in-time state rather than continuous trustworthiness, and its device-enrollment step is currently trust-on-first-use. Every one of these is a standard, named category of measured-boot/attestation limitation (RTM boundary, verify-vs-measure, freshness-vs-continuous-trust, enrollment trust) — stating them explicitly is itself part of doing this project rigorously, not a list of things left broken.
