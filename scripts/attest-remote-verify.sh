@@ -29,13 +29,43 @@
 # unverified command instead of the file that was already cryptographically
 # checked against the signed quote digest two steps earlier.
 #
-# Deliberately NOT implemented (documented scope limitation, not an
-# oversight): validating the AK itself chains back to the EK/manufacturer
-# CA (already extracted in Phase 1 — ek_cert_rsa.der/ek_cert_ecc.der — but
-# not wired into this script's trust-on-first-use AK fetch below). A real
-# deployment would enroll a device's AK once via a secure, out-of-band
-# provisioning step that validates that chain, not blindly trust whatever
-# AK a host answers with on first contact.
+# EK provenance IS validated (added 2026-08-30): on first enrollment, this
+# script fetches the device's real EK certificate over SSH and verifies it
+# chains to Infineon's manufacturer CA — the same standard-form chain a
+# browser does for TLS, just with Infineon's OPTIGA TPM root instead of a
+# public web CA. This proves "genuine Infineon-manufactured TPM", not a
+# software TPM or a clone. The EK cert's embedded public key is then
+# cross-checked against the live EK at 0x81010001, so a verified cert can't
+# be replayed against a different device's EK.
+#
+# NOTE on chain files: certs/infineon_{rsa,ecc}_chain_ca042.pem in this repo
+# are specific to THIS device's SLB9670 (Xenon board) — its EK certs are
+# issued by Infineon's "CA 042" batch, chaining to the older
+# "OptigaRsaRootCA"/"OptigaEccRootCA" (no "2" suffix). This is genuinely
+# different from certs/infineon_{rsa,ecc}_chain.pem (CA 066 / "...Root CA 2"),
+# which is Phase 1's separate SLB9673 I2C HAT — a different physical chip
+# with its own unique EK and its own CA generation. Confirmed by extracting
+# and inspecting both real certs, not assumed — see phase2/README.md's
+# Remote Attestation section for the full story.
+#
+# Deliberately NOT implemented: full TPM2_ActivateCredential-based proof
+# that the AK is resident in the SAME TPM as the verified EK (the standard
+# TCG credential-activation protocol — see TPM2_MakeCredential/
+# TPM2_ActivateCredential in the spec). Attempted on real hardware and hit a
+# reproducible, silent failure in tpm2-tools' credential-activation code
+# (`tpm2_makecredential`, tool_rc_general_error/-2 with zero diagnostic
+# output even under TSS2_LOG=esys+trace) — confirmed on both tpm2-tools 5.2
+# (this verifier machine) and 5.7 (the Pi), via both the offline PEM+-G path
+# and the online ESAPI path (loading the EK as an external object on a real
+# TPM and calling Esys_MakeCredential directly) — same silent failure both
+# ways, so it isn't a config or version mismatch on this project's end. What
+# IS proven instead: EK provenance (this is a genuine Infineon chip, not a
+# clone) via the cert-chain check above. What's still missing: cryptographic
+# proof that the specific AK used for quotes lives inside that exact chip
+# (currently trust-on-first-use for the AK itself, same as before). A real
+# deployment would either resolve the tpm2-tools issue or reimplement
+# MakeCredential's RSA-OAEP+HMAC/AES-CFB blob construction directly against
+# the TCG spec.
 #
 # Usage:
 #   ./attest-remote-verify.sh <pi-host-or-ip> [ak-pub-file]
@@ -50,10 +80,19 @@ set -euo pipefail
 PI_HOST="${1:?Usage: $0 <pi-host-or-ip> [ak-pub-file]}"
 AK_PUB="${2:-./ak_public.pem}"
 AK_HANDLE="0x81000002"
+EK_HANDLE="0x81010001"
 PCR_LIST="sha256:1,8,10"
 WORK_DIR="$(mktemp -d)"
 GOLDEN_DIR="${HOME}/.tpm-poc-rpi-attest"
 GOLDEN_PCR10="${GOLDEN_DIR}/pcr10-golden.txt"
+
+# This device's SLB9670 EK certs chain to Infineon's "CA 042" batch, not the
+# "CA 066" batch Phase 1's separate SLB9673 HAT uses — see the header
+# comment. Resolved relative to this script's own location so it works
+# regardless of the caller's current directory.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RSA_CHAIN_PEM="${SCRIPT_DIR}/../certs/infineon_rsa_chain_ca042.pem"
+ECC_CHAIN_PEM="${SCRIPT_DIR}/../certs/infineon_ecc_chain_ca042.pem"
 
 # Verified golden baseline for PCR 1/8 — see phase2/README.md, confirmed
 # identical across two genuine power cycles, 2026-08-29. These change only
@@ -104,6 +143,44 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 mkdir -p "$GOLDEN_DIR"
 
 banner "Remote Attestation — ${PI_HOST}"
+
+# --- EK provenance: verify the device's real EK cert chains to Infineon's
+# manufacturer CA, and that the cert actually belongs to the live TPM we're
+# talking to (not a cert file from some other chip). Run every time, not
+# cached — cheap (no network fetch, the chain PEMs ship in this repo) and
+# avoids a stale trust-once-forever cache. ---
+info "Fetching EK certificate from ${PI_HOST}..."
+ssh "${SSH_OPTS[@]}" "root@${PI_HOST}" \
+    "tpm2_getekcertificate -o /tmp/ek_cert_rsa.der -o /tmp/ek_cert_ecc.der >/dev/null 2>&1" \
+    || fail "Could not fetch EK certificate from device"
+scp -q "${SSH_OPTS[@]}" "root@${PI_HOST}:/tmp/ek_cert_rsa.der" "$WORK_DIR/" \
+    || fail "Could not retrieve EK certificate"
+
+# Split the bundled chain PEM (intermediate cert, then root — see how these
+# files are built in phase2/README.md) into its two certs so openssl only
+# trusts the actual root, chaining through the intermediate, rather than
+# trusting both certs in the bundle equally.
+awk -v n=0 '/-----BEGIN CERTIFICATE-----/{n++} {print > ("'"$WORK_DIR"'/rsa_chain_" n ".pem")}' "$RSA_CHAIN_PEM"
+openssl x509 -inform der -in "$WORK_DIR/ek_cert_rsa.der" -out "$WORK_DIR/ek_cert_rsa.pem" \
+    || fail "Device's EK certificate is not valid DER — this alone is grounds for not trusting it"
+openssl verify -CAfile "$WORK_DIR/rsa_chain_2.pem" -untrusted "$WORK_DIR/rsa_chain_1.pem" \
+    "$WORK_DIR/ek_cert_rsa.pem" > /dev/null \
+    || fail "EK certificate does NOT chain to Infineon's manufacturer CA — refusing to trust this device (possible clone/software TPM impersonating the real chip)"
+pass "EK certificate chains to Infineon's manufacturer CA (genuine SLB9670, not a clone)"
+
+# Cross-check: the cert's embedded public key must match the LIVE EK at
+# 0x81010001 on the device right now — otherwise a verified-but-unrelated
+# cert could be presented alongside a different, untrusted EK.
+ssh "${SSH_OPTS[@]}" "root@${PI_HOST}" \
+    "tpm2_readpublic -c ${EK_HANDLE} -f pem -o /tmp/ek_live.pem >/dev/null 2>&1" \
+    || fail "Could not read live EK public key from device"
+scp -q "${SSH_OPTS[@]}" "root@${PI_HOST}:/tmp/ek_live.pem" "$WORK_DIR/" \
+    || fail "Could not retrieve live EK public key"
+CERT_MODULUS=$(openssl x509 -in "$WORK_DIR/ek_cert_rsa.pem" -noout -pubkey | openssl rsa -pubin -noout -modulus 2>/dev/null)
+LIVE_MODULUS=$(openssl rsa -pubin -in "$WORK_DIR/ek_live.pem" -noout -modulus 2>/dev/null)
+[[ -n "$CERT_MODULUS" && "$CERT_MODULUS" == "$LIVE_MODULUS" ]] \
+    || fail "EK certificate's public key does NOT match the device's live EK — cert does not belong to this chip"
+pass "EK certificate's public key matches this device's live EK — verified device identity is genuine"
 
 # --- One-time: fetch the AK public key if we don't have it locally yet ---
 # The AK never changes across boots (it's a persistent handle), so this is
