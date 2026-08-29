@@ -72,6 +72,15 @@ GOLDEN_PCR10="${GOLDEN_DIR}/pcr10-golden.txt"
 GOLDEN_PCR1="0x1872401838DC0197D6499A2950DD20A9400067441ED311E37095A9725B1B2AC8"
 GOLDEN_PCR8="0x208261DF4C05E875E696FBEF1A4801FA9C13A3F9C6B3680967647196F3815708"
 
+# accept-new: trust a genuinely new host key on first contact (no
+# interactive prompt, needed for this script to run non-interactively) but
+# still loudly fail — the real MITM protection — if an *already-trusted*
+# key for this host suddenly changes. The device regenerates its SSH host
+# keys on every image rebuild/reflash (confirmed 2026-08-29 — the "WARNING:
+# REMOTE HOST IDENTIFICATION HAS CHANGED" that shows up after reflashing is
+# expected in that specific case, not a real alarm).
+SSH_OPTS=(-o StrictHostKeyChecking=accept-new)
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -102,8 +111,8 @@ banner "Remote Attestation — ${PI_HOST}"
 # above about what a hardened version of this step would also check.
 if [[ ! -f "$AK_PUB" ]]; then
     info "No local AK public key at ${AK_PUB} — fetching once from ${PI_HOST}"
-    ssh "root@${PI_HOST}" "tpm2_readpublic -c ${AK_HANDLE} -f pem -o /tmp/ak_public.pem" > /dev/null
-    scp -q "root@${PI_HOST}:/tmp/ak_public.pem" "$AK_PUB"
+    ssh "${SSH_OPTS[@]}" "root@${PI_HOST}" "tpm2_readpublic -c ${AK_HANDLE} -f pem -o /tmp/ak_public.pem" > /dev/null
+    scp -q "${SSH_OPTS[@]}" "root@${PI_HOST}:/tmp/ak_public.pem" "$AK_PUB"
     pass "AK public key saved to ${AK_PUB} — reused on every future run"
 else
     info "Using cached AK public key: ${AK_PUB}"
@@ -117,13 +126,13 @@ info "Nonce: ${NONCE}"
 # format (-F values): just the selected PCR digests, concatenated in PCR
 # order, no struct framing — see the header comment for why.
 info "Requesting quote from ${PI_HOST} over PCR 1/8/10..."
-ssh "root@${PI_HOST}" "
+ssh "${SSH_OPTS[@]}" "root@${PI_HOST}" "
     tpm2_quote -c ${AK_HANDLE} -l ${PCR_LIST} -q ${NONCE} \
         -m /tmp/quote.msg -s /tmp/quote.sig -o /tmp/quote.pcrs -F values -g sha256 >/dev/null
 "
 pass "Quote generated on device"
 
-scp -q "root@${PI_HOST}:/tmp/quote.msg" "root@${PI_HOST}:/tmp/quote.sig" "root@${PI_HOST}:/tmp/quote.pcrs" "$WORK_DIR/"
+scp -q "${SSH_OPTS[@]}" "root@${PI_HOST}:/tmp/quote.msg" "root@${PI_HOST}:/tmp/quote.sig" "root@${PI_HOST}:/tmp/quote.pcrs" "$WORK_DIR/"
 pass "Quote files retrieved"
 
 # --- Verify: signature (chains to the AK) and nonce freshness ---
