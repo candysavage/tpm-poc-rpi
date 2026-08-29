@@ -5,24 +5,75 @@
 MACHINE = "raspberrypi4-64"
 DISTRO  = "poky"
 
-# Pull in TCG/IMA-aware recipe logic from meta-security and meta-security/meta-tpm
-DISTRO_FEATURES:append = " security tpm2 ima"
-MACHINE_FEATURES:append = " tpm2"
+# U-Boot as second-stage bootloader, needed for measured boot (PCR-extend the
+# kernel before Linux starts). RPI_USE_U_BOOT hard-requires ENABLE_UART=1 —
+# enforced by a bbfatal() in meta-raspberrypi's rpi-config recipe, build fails
+# without it even if you don't care about the serial console.
+RPI_USE_U_BOOT = "1"
+ENABLE_UART = "1"
 
+# raspberrypi4-64.conf defaults SERIAL_CONSOLES to "115200;ttyS0" (the
+# mini-UART) — correct for the stock config, but disable-bt below moves the
+# physical console to the PL011 (ttyAMA0) instead. Left at the stale
+# default, /etc/inittab's getty kept trying to open ttyS0, which no longer
+# corresponds to anything, immediately failing and triggering busybox's
+# "Id S0 respawning too fast: disabled for 5 minutes". Weak (?=) default in
+# the machine conf, so a plain override here is enough.
+SERIAL_CONSOLES = "115200;ttyAMA0"
+
+# Boot via an (unsigned) FIT image + bootm instead of the default booti/raw
+# Image path. Required for CONFIG_MEASURED_BOOT to actually work: booti's
+# own raw-Image loader never populates images->os.image_start/image_len,
+# which is what U-Boot's bootm_measure() reads to hash the kernel into
+# PCR 8. No signing (UBOOT_SIGN_ENABLE intentionally not set) — measured
+# boot only, not verified/secure boot.
+KERNEL_CLASSES = "kernel-fitimage"
+KERNEL_IMAGETYPE = "fitImage"
+KERNEL_BOOTCMD = "bootm"
+# KERNEL_DEVICETREE deliberately left at its meta-raspberrypi default here
+# (not blanked) — boot.scr always passes the external, firmware-applied FDT
+# to bootm explicitly, so the FIT's own embedded dtb sections are unused;
+# blanking it had the unintended side effect of also killing meta-raspberrypi's
+# entire stock overlay deployment list (150+ files, tied to the same
+# variable via a weak default), so disable-bt below would silently never
+# apply. See meta-custom/recipes-kernel/linux/linux-raspberrypi_%.bbappend
+# for the actual per-recipe UBOOT_ENTRYPOINT/LOADADDRESS + why it must live
+# there, not here (recipe .inc files are parsed after configuration files,
+# so a local.conf override loses the precedence fight).
+
+# ─── Distro features ────────────────────────────────────────────────────────
+DISTRO_FEATURES:append = " security tpm2 ima"
+
+# ─── Image features ─────────────────────────────────────────────────────────
+IMAGE_FEATURES += "ssh-server-openssh"
+
+# ─── Packages ───────────────────────────────────────────────────────────────
 IMAGE_INSTALL:append = " \
     libtss2-tcti-device \
     tpm2-tss \
     tpm2-tools \
     tpm2-abrmd \
     kernel-modules \
-    kernel-devicetree \
 "
 
-# --- Custom TPM overlay (see meta-custom/recipes-bsp/tpm-overlay) ---
-# There is no stock device-tree overlay for the Infineon SLB9673 in
-# meta-raspberrypi. dtoverlay=tpm-slb9673 (a guess at a stock name) does NOT
-# exist and will not work. The overlay below is hand-written and compiled by
-# the tpm-overlay_1.0.bb recipe in this layer.
-RPI_EXTRA_CONFIG = 'dtoverlay=tpm-slb9673-i2c\ndtparam=i2c_arm=on'
-RPI_EXTRA_IMAGE_BOOT_FILES:append = " tpm-slb9673-i2c.dtbo;overlays/tpm-slb9673-i2c.dtbo"
+# ─── RPi hardware ───────────────────────────────────────────────────────────
+MACHINE_FEATURES:append = " tpm2"
+
+# --- Custom TPM overlays (see meta-custom/recipes-bsp/tpm-overlay) ---
+# tpm-slb9673-i2c: hand-written, no stock overlay exists for the SLB9673 in
+#   meta-raspberrypi. Phase 1/2 HAT, kept wired for comparison.
+# tpm-slb9670-spi-gpio: Xenon SPI TPM board (SLB9670), measured boot work.
+#   Also hand-written, NOT the stock tpm-slb9670 overlay — mainline U-Boot
+#   has no BCM2711 hardware SPI0 controller driver, only the software
+#   spi-gpio bit-bang driver, so the TPM has to be reachable that way for
+#   U-Boot's own pre-boot measurement to work at all. Same overlay/FDT is
+#   used for both U-Boot and Linux (applied once at the firmware stage), so
+#   Linux uses spi-gpio too instead of the real hardware tpm_tis_spi path.
+#   CS is GPIO7 in cs-gpios, not the native spi0 chip select.
+# disable-bt: frees the PL011 UART onto GPIO14/15 for U-Boot's console (its
+#   board config expects the PL011, not the mini-UART the RPi firmware maps
+#   there by default when Bluetooth is left enabled). Bluetooth is unused
+#   in this project.
+RPI_EXTRA_CONFIG = 'dtoverlay=tpm-slb9673-i2c\ndtparam=i2c_arm=on\ndtoverlay=tpm-slb9670-spi-gpio\ndtoverlay=disable-bt'
+RPI_EXTRA_IMAGE_BOOT_FILES:append = " tpm-slb9673-i2c.dtbo;overlays/tpm-slb9673-i2c.dtbo tpm-slb9670-spi-gpio.dtbo;overlays/tpm-slb9670-spi-gpio.dtbo"
 EXTRA_IMAGEDEPENDS:append = " tpm-overlay"

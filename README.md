@@ -123,10 +123,12 @@ sudo ./scripts/attest.sh clean    # remove temp files
 
 ### Phase 2 — Yocto 🔲
 - [x] Custom Yocto image with `meta-raspberrypi` + `meta-security`, builds and boots on RPi4
-- [x] Custom device tree overlay for SLB9673 (I2C — no stock overlay exists; SPI deprioritized, I2C works fine)
+- [x] Custom device tree overlays for both TPM chips — SLB9673 over I2C, SLB9670 over bit-banged SPI (`spi-gpio`, required since mainline U-Boot has no BCM2711 hardware SPI0 driver)
 - [x] `tpm2-tss`, `tpm2-tools`, `tpm2-abrmd` baked into image, `abrmd` running at boot under busybox init
-- [x] Key hierarchy (EK/SRK/AK) provisioned and persisted on the Yocto image
-- [ ] Measured boot with PCR extension at boot time — **in progress**: SPI hardware pivot decided (I2C confirmed unusable for U-Boot on RPi, see `phase2/README.md`), build-tree config staged and validated, blocked on a physical connector adapter
+- [x] Key hierarchy (EK/SRK/AK) provisioned and persisted on the Yocto image, on both TPM chips
+- [x] **Measured boot: U-Boot → FIT → Linux chain fully working and verified.** U-Boot measures bootargs (PCR 1) and the kernel image (PCR 8) into the TPM before Linux starts; a deterministic golden PCR baseline is confirmed across genuine power cycles. Ten distinct bugs found and fixed across the firmware/bootloader/kernel/build-system stack to get there — see `phase2/README.md`'s [Measured Boot](phase2/README.md#measured-boot) section for the full technical writeup.
+- [ ] IMA (PCR 10) — continues the chain from U-Boot into kernel-side userspace measurement, not yet started
+- [ ] Remote attestation demo — networked extension of Phase 1's local quote/verify flow
 - [ ] Reference: [embetrix/meta-raspberrypi-secure](https://github.com/embetrix/meta-raspberrypi-secure)
 
 See [phase2/README.md](phase2/README.md) for the full writeup.

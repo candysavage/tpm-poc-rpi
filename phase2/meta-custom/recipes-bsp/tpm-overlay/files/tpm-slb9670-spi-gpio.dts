@@ -1,0 +1,91 @@
+/*
+ * Device Tree overlay for the Infineon SLB9670 TPM (Xenon SPI TPM board),
+ * bit-banged over GPIO instead of the hardware SPI0 controller.
+ *
+ * Mainline U-Boot has no BCM2711 hardware SPI0 controller driver, so the
+ * TPM has to be reachable from U-Boot via the software "spi-gpio" bitbang
+ * driver. This overlay is loaded for both U-Boot and Linux (applied once at
+ * the RPi firmware stage, same FDT handed to both), so Linux uses the same
+ * bit-banged bus rather than the real spi0 hardware driver used by the
+ * stock tpm-slb9670 overlay.
+ *
+ * PLT_RST (Xenon pin 19) is left unconnected on this board, so there is no
+ * reset-gpios property here.
+ *
+ * tpm_event_log_addr/size (tpm@0 node below): DIAGNOSED 2026-08-29 on real
+ * hardware — without these, U-Boot's tcg2_platform_get_log() (lib/tpm-v2.c)
+ * gets addr=NULL/size=0, so every measurement's log-append fails
+ * ("log too large: 0 + N > 0"). This isn't cosmetic: bootm_measure()
+ * (boot/bootm.c) checks tcg2_measure_data()'s return value — which is
+ * whatever the log-append check returns, even though the real PCR extend
+ * already happened — and on failure jumps straight past the devicetree/
+ * bootargs/kernel-image measurements entirely. Confirmed on hardware: PCR 8
+ * stayed all-zero (kernel measurement never attempted) and PCR 0/PCR 1
+ * came out identical (both just the generic PCR-0-through-7 "separator"
+ * fallback event from the error path in tcg2_measurement_term(), not real
+ * content). 0x08000000/64KB is a scratch region clear of the kernel's own
+ * decompression target (0x200000) and the FIT staging address (0x04000000,
+ * see rpi-u-boot-scr.bbappend) — U-Boot-side only for now, not backed by a
+ * proper /reserved-memory node, so don't expect this log to survive/be
+ * readable from Linux after boot without further work later.
+ */
+
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2711";
+
+	fragment@0 {
+		target = <&spi0>;
+		__overlay__ {
+			compatible = "spi-gpio";
+			pinctrl-names = "default";
+			pinctrl-0 = <&spi0_gpio7>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "okay";
+
+			gpio-sck = <&gpio 11 0>;
+			gpio-mosi = <&gpio 10 0>;
+			gpio-miso = <&gpio 9 0>;
+			cs-gpios = <&gpio 7 1>;
+			num-chipselects = <1>;
+			spi-delay-us = <0>;
+
+			tpm: tpm@0 {
+				compatible = "infineon,slb9670", "tcg,tpm_tis-spi";
+				reg = <0>;
+				spi-max-frequency = <1000000>;
+				status = "okay";
+
+				tpm_event_log_addr = <0x08000000>;
+				tpm_event_log_size = <0x00010000>;
+			};
+		};
+	};
+
+	/* Re-mux spi0's pins as plain GPIO instead of the SPI0 ALT function,
+	 * since we're bit-banging rather than using the hardware controller. */
+	fragment@1 {
+		target = <&spi0_gpio7>;
+		__overlay__ {
+			brcm,pins = <7 8 9 10 11>;
+			brcm,function = <0>;
+		};
+	};
+
+	fragment@2 {
+		target = <&spidev0>;
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+
+	fragment@3 {
+		target = <&spidev1>;
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+};
