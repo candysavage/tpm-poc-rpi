@@ -74,6 +74,16 @@
 # verifier), not the Pi. Verification must never run on the device being
 # verified — a compromised device could just lie about its own
 # verification result.
+#
+# Every device-side tpm2-tools call below is pinned to
+# --tcti=device:/dev/tpmrm0. Without it, tpm2-tools tries the tabrmd TCTI
+# (talks to tpm2-abrmd over D-Bus) first and only falls back to the device
+# on failure — this image has no D-Bus daemon at all (busybox init, no
+# systemd), so that first attempt always fails with a noisy
+# "failed to allocate dbus proxy object" error before silently succeeding
+# via the fallback. tpm2-abrmd itself runs fine; it just can't be reached
+# this way on this image. Pinning the TCTI skips the doomed first attempt
+# entirely instead of just hiding its output.
 
 set -euo pipefail
 
@@ -151,7 +161,7 @@ banner "Remote Attestation — ${PI_HOST}"
 # avoids a stale trust-once-forever cache. ---
 info "Fetching EK certificate from ${PI_HOST}..."
 ssh "${SSH_OPTS[@]}" "root@${PI_HOST}" \
-    "tpm2_getekcertificate -o /tmp/ek_cert_rsa.der -o /tmp/ek_cert_ecc.der >/dev/null 2>&1" \
+    "tpm2_getekcertificate --tcti=device:/dev/tpmrm0 -o /tmp/ek_cert_rsa.der -o /tmp/ek_cert_ecc.der >/dev/null 2>&1" \
     || fail "Could not fetch EK certificate from device"
 scp -q "${SSH_OPTS[@]}" "root@${PI_HOST}:/tmp/ek_cert_rsa.der" "$WORK_DIR/" \
     || fail "Could not retrieve EK certificate"
@@ -172,7 +182,7 @@ pass "EK certificate chains to Infineon's manufacturer CA (genuine SLB9670, not 
 # 0x81010001 on the device right now — otherwise a verified-but-unrelated
 # cert could be presented alongside a different, untrusted EK.
 ssh "${SSH_OPTS[@]}" "root@${PI_HOST}" \
-    "tpm2_readpublic -c ${EK_HANDLE} -f pem -o /tmp/ek_live.pem >/dev/null 2>&1" \
+    "tpm2_readpublic --tcti=device:/dev/tpmrm0 -c ${EK_HANDLE} -f pem -o /tmp/ek_live.pem >/dev/null 2>&1" \
     || fail "Could not read live EK public key from device"
 scp -q "${SSH_OPTS[@]}" "root@${PI_HOST}:/tmp/ek_live.pem" "$WORK_DIR/" \
     || fail "Could not retrieve live EK public key"
@@ -188,7 +198,7 @@ pass "EK certificate's public key matches this device's live EK — verified dev
 # above about what a hardened version of this step would also check.
 if [[ ! -f "$AK_PUB" ]]; then
     info "No local AK public key at ${AK_PUB} — fetching once from ${PI_HOST}"
-    ssh "${SSH_OPTS[@]}" "root@${PI_HOST}" "tpm2_readpublic -c ${AK_HANDLE} -f pem -o /tmp/ak_public.pem" > /dev/null
+    ssh "${SSH_OPTS[@]}" "root@${PI_HOST}" "tpm2_readpublic --tcti=device:/dev/tpmrm0 -c ${AK_HANDLE} -f pem -o /tmp/ak_public.pem" > /dev/null
     scp -q "${SSH_OPTS[@]}" "root@${PI_HOST}:/tmp/ak_public.pem" "$AK_PUB"
     pass "AK public key saved to ${AK_PUB} — reused on every future run"
 else
@@ -204,7 +214,7 @@ info "Nonce: ${NONCE}"
 # order, no struct framing — see the header comment for why.
 info "Requesting quote from ${PI_HOST} over PCR 1/8/10..."
 ssh "${SSH_OPTS[@]}" "root@${PI_HOST}" "
-    tpm2_quote -c ${AK_HANDLE} -l ${PCR_LIST} -q ${NONCE} \
+    tpm2_quote --tcti=device:/dev/tpmrm0 -c ${AK_HANDLE} -l ${PCR_LIST} -q ${NONCE} \
         -m /tmp/quote.msg -s /tmp/quote.sig -o /tmp/quote.pcrs -F values -g sha256 >/dev/null
 "
 pass "Quote generated on device"
